@@ -1,0 +1,21 @@
+# Local automation runtime logs/mailboxes
+.codesys_agent/
+.agents/
+.codex/
+tmp/
+
+# Local project staging/caches
+.projects/
+
+# CODESYS generated/user-local files
+*.opt
+*.compileinfo
+*.bootinfo
+*.bootinfo_guids
+*.precompilecache
+
+# Python/editor/OS noise
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
