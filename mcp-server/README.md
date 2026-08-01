@@ -34,6 +34,8 @@ only named MCP tools and translates them into calls to
 For a complete two-computer procedure starting with a clean Windows CODESYS
 computer and a local Ollama/AnythingLLM Ubuntu computer, see
 [`Connect a local AnythingLLM installation through MCP`](../README.md#connect-a-local-anythingllm-installation-through-mcp).
+For routine startup after the one-time setup, see
+[`Daily startup after the initial setup`](../README.md#13-daily-startup-after-the-initial-setup).
 
 Node.js 20 or newer is required. From the repository root:
 
@@ -49,7 +51,33 @@ $McpRandom = [Security.Cryptography.RandomNumberGenerator]::Create()
 $McpBytes = New-Object byte[] 32
 $McpRandom.GetBytes($McpBytes)
 $McpRandom.Dispose()
-$env:CODESYS_MCP_API_KEY = ([BitConverter]::ToString($McpBytes)).Replace("-", "")
+$McpApiKey = ([BitConverter]::ToString($McpBytes)).Replace("-", "")
+$env:CODESYS_MCP_API_KEY = $McpApiKey
+$McpApiKey.Length
+```
+
+The final command must print `64`. Placeholder strings such as
+`YOUR_RANDOM_SECRET` are not valid API keys. On a trusted, single-user Windows
+account, save the generated key for future PowerShell sessions:
+
+```powershell
+[Environment]::SetEnvironmentVariable(
+  "CODESYS_MCP_API_KEY",
+  $McpApiKey,
+  "User"
+)
+```
+
+On a shared Windows account, omit this persistence step and set the process
+environment variable manually whenever the bridge is started. To load the
+saved value explicitly in a later PowerShell session:
+
+```powershell
+$env:CODESYS_MCP_API_KEY = [Environment]::GetEnvironmentVariable(
+  "CODESYS_MCP_API_KEY",
+  "User"
+)
+$env:CODESYS_MCP_API_KEY.Length
 ```
 
 For a first local-only test:
