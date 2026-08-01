@@ -124,7 +124,7 @@ if ($Command -eq "hydraulic-cylinder-fb" -and -not $Name) {
     $Name = "FB_HydraulicCylinder"
 }
 
-if (-not $Project) {
+if (-not $Project -and -not $NoProjectPathMatch.IsPresent) {
     $Project = Join-Path $Root "FirstProject.project"
 }
 
@@ -168,9 +168,11 @@ if ($Command -eq "send-json") {
     $Payload = @{
         action = $Action
         agent_id = $AgentId
-        project_path = (Resolve-Path $Project).Path
         require_project_path_match = -not $NoProjectPathMatch.IsPresent
         save = -not $NoSave.IsPresent
+    }
+    if ($Project) {
+        $Payload["project_path"] = (Resolve-Path $Project).Path
     }
 
     if ($Container) {

@@ -1,0 +1,20 @@
+{
+  "name": "codesys-mcp-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Authenticated, allowlisted MCP bridge for thecodesysvibecoder.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test",
+    "smoke": "node scripts/smoke.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "express": "5.2.1",
+    "zod": "4.1.13"
+  }
+}

@@ -19,3 +19,8 @@ __pycache__/
 *.pyc
 .DS_Store
 Thumbs.db
+
+# MCP bridge local dependencies and secrets
+mcp-server/node_modules/
+mcp-server/.env
+mcp-server/*.log

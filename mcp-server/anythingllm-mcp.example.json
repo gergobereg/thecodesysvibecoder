@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "codesys": {
+      "type": "streamable",
+      "url": "http://<WINDOWS_PC_IP_ADDRESS>:8765/mcp",
+      "headers": {
+        "X-API-Key": "REPLACE_WITH_THE_SAME_RANDOM_SECRET"
+      }
+    }
+  }
+}
