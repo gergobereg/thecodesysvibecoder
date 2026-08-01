@@ -20,6 +20,8 @@ INBOX_DIR = None
 OUTBOX_DIR = None
 PROCESSED_DIR = None
 STOP_FILE = None
+POLL_INTERVAL_MS = 500
+_AGENT_REGISTRY_ATTRIBUTE = "_thecodesysvibecoder_active_agents"
 
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
@@ -102,14 +104,17 @@ def _write_json(path, payload):
         handle.write("\n")
 
 
-def _process_request(path):
+def _process_request(path, agent_id=None, outbox_dir=None, processed_dir=None):
+    agent_id = agent_id or AGENT_ID
+    outbox_dir = outbox_dir or OUTBOX_DIR
+    processed_dir = processed_dir or PROCESSED_DIR
     base = os.path.basename(path)
-    result_path = os.path.join(OUTBOX_DIR, base + ".result.json")
+    result_path = os.path.join(outbox_dir, base + ".result.json")
     try:
         _reload_module(codesys_agent)
         request = _read_json(path)
         request["result_path"] = result_path
-        request["agent_id"] = AGENT_ID
+        request["agent_id"] = agent_id
         result = codesys_agent.handle_request(request)
         _write_json(result_path, result)
     except Exception as exc:
@@ -119,10 +124,117 @@ def _process_request(path):
             "traceback": traceback.format_exc(),
         })
 
-    processed_path = os.path.join(PROCESSED_DIR, base)
+    processed_path = os.path.join(processed_dir, base)
     if os.path.exists(processed_path):
         os.remove(processed_path)
     os.rename(path, processed_path)
+
+
+def _agent_registry():
+    # Keep the registry on sys so it survives Execute Script File returning and
+    # also survives a later reload of this module in the same CODESYS process.
+    registry = getattr(sys, _AGENT_REGISTRY_ATTRIBUTE, None)
+    if registry is None:
+        registry = {}
+        setattr(sys, _AGENT_REGISTRY_ATTRIBUTE, registry)
+    return registry
+
+
+def _create_dispatcher_timer(interval_ms, tick_handler):
+    try:
+        import clr
+        clr.AddReference("WindowsBase")
+        from System import TimeSpan
+        from System.Windows.Threading import DispatcherTimer
+    except Exception:
+        raise Exception(
+            "Unable to load the .NET UI DispatcherTimer required by the "
+            "non-blocking CODESYS agent.\n%s" % traceback.format_exc()
+        )
+
+    timer = DispatcherTimer()
+    timer.Interval = TimeSpan.FromMilliseconds(float(interval_ms))
+    timer.Tick += tick_handler
+    return timer
+
+
+class _MailboxAgent(object):
+    def __init__(
+        self,
+        agent_id,
+        state_dir,
+        inbox_dir,
+        outbox_dir,
+        processed_dir,
+        stop_file,
+    ):
+        self.agent_id = agent_id
+        self.state_dir = state_dir
+        self.inbox_dir = inbox_dir
+        self.outbox_dir = outbox_dir
+        self.processed_dir = processed_dir
+        self.stop_file = stop_file
+        self.registry_key = os.path.normcase(os.path.abspath(state_dir))
+        self.busy = False
+        self.stopped = False
+        self.tick_handler = self._on_tick
+        self.timer = _create_dispatcher_timer(POLL_INTERVAL_MS, self.tick_handler)
+
+    def start(self):
+        self.timer.Start()
+
+    def stop(self):
+        if self.stopped:
+            return
+        self.stopped = True
+        self.timer.Stop()
+        try:
+            self.timer.Tick -= self.tick_handler
+        except Exception:
+            pass
+
+        registry = _agent_registry()
+        if registry.get(self.registry_key) is self:
+            del registry[self.registry_key]
+        print("CODESYS in-IDE agent stopped: " + self.agent_id)
+
+    def _next_request_path(self):
+        try:
+            names = sorted(os.listdir(self.inbox_dir))
+        except Exception:
+            names = []
+
+        for name in names:
+            if name.lower().endswith(".json"):
+                return os.path.join(self.inbox_dir, name)
+        return None
+
+    def _on_tick(self, sender, event_args):
+        # DispatcherTimer invokes this callback on the CODESYS UI dispatcher.
+        # Process only one request per tick so a mailbox backlog cannot keep the
+        # UI thread occupied indefinitely.
+        if self.stopped or self.busy:
+            return
+
+        self.busy = True
+        try:
+            if os.path.exists(self.stop_file):
+                self.stop()
+                return
+
+            request_path = self._next_request_path()
+            if request_path is not None:
+                _process_request(
+                    request_path,
+                    agent_id=self.agent_id,
+                    outbox_dir=self.outbox_dir,
+                    processed_dir=self.processed_dir,
+                )
+        except Exception:
+            print("CODESYS in-IDE agent polling error: " + self.agent_id)
+            print(traceback.format_exc())
+        finally:
+            self.busy = False
 
 
 def main(agent_id=None):
@@ -131,27 +243,34 @@ def main(agent_id=None):
     if os.path.exists(STOP_FILE):
         os.remove(STOP_FILE)
 
-    print("CODESYS in-IDE agent started.")
+    registry_key = os.path.normcase(os.path.abspath(STATE_DIR))
+    registry = _agent_registry()
+    existing = registry.get(registry_key)
+    if existing is not None:
+        existing.stop()
+
+    agent = _MailboxAgent(
+        AGENT_ID,
+        STATE_DIR,
+        INBOX_DIR,
+        OUTBOX_DIR,
+        PROCESSED_DIR,
+        STOP_FILE,
+    )
+    registry[registry_key] = agent
+    try:
+        agent.start()
+    except Exception:
+        if registry.get(registry_key) is agent:
+            del registry[registry_key]
+        raise
+
+    print("CODESYS in-IDE agent started (non-blocking).")
     print("Agent: " + AGENT_ID)
     print("State: " + STATE_DIR)
     print("Inbox: " + INBOX_DIR)
     print("Stop file: " + STOP_FILE)
-
-    while not os.path.exists(STOP_FILE):
-        names = []
-        try:
-            names = sorted(os.listdir(INBOX_DIR))
-        except Exception:
-            names = []
-
-        for name in names:
-            if not name.lower().endswith(".json"):
-                continue
-            _process_request(os.path.join(INBOX_DIR, name))
-
-        system.delay(500)
-
-    print("CODESYS in-IDE agent stopped.")
+    print("Startup complete; control has returned to the CODESYS user interface.")
 
 
 if __name__ == "__main__":

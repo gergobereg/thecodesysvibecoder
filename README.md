@@ -7,18 +7,19 @@ instance.
 
 ## Quick guide
 
- - Start the in-IDE agent:
+- Start the in-IDE agent:
     1. Tools / Scripting / Execute Script File
     2. `ide_scripts\run_in_ide_agent.py`
+    3. The startup script returns immediately; the registered agent remains active.
 - Stop the agent:
-    `powershell -NoProfile -ExecutionPolicy Bypass -File .\launcher\Send-CodesysRequest.ps1 stop`
+    From the repository root, run `powershell -NoProfile -ExecutionPolicy Bypass -File .\launcher\Send-CodesysRequest.ps1 stop`.
 
 ## Local automation
 
 This workspace contains a small split-runtime automation layer for CODESYS V3.5 SP22 Patch 1.
 
 - `ide_scripts/codesys_agent.py` runs inside the CODESYS ScriptEngine / IronPython environment.
-- `ide_scripts/run_in_ide_agent.py` is the preferred path for an already-running CODESYS instance. Run it once inside CODESYS, then send requests from this workspace.
+- `ide_scripts/run_in_ide_agent.py` is the preferred path for an already-running CODESYS instance. Run it once inside CODESYS; it registers a UI-thread timer, returns control to the user interface, and then handles requests from this workspace.
 - `launcher/Send-CodesysRequest.ps1` writes requests for the in-IDE agent and waits for results. It does not start CODESYS.
 - `launcher/Invoke-CodesysAgent.ps1` starts CODESYS with `--runscript` from PowerShell as a fallback for headless/new-instance workflows.
 - `launcher/codesys_runner.py` provides the same flow for a working CPython install.
@@ -27,7 +28,7 @@ This workspace contains a small split-runtime automation layer for CODESYS V3.5 
 For the already-running IDE workflow:
 
 1. In CODESYS, run `ide_scripts\run_in_ide_agent.py` using the built-in scripting command or Python editor.
-2. Leave that script running.
+2. Wait for the script command to return. The registered agent remains active while the CODESYS user interface is available.
 3. From this workspace, send requests:
 
 ```powershell
@@ -36,6 +37,36 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\launcher\Send-CodesysReque
 powershell -NoProfile -ExecutionPolicy Bypass -File .\launcher\Send-CodesysRequest.ps1 read-object -Name MyObject
 powershell -NoProfile -ExecutionPolicy Bypass -File .\launcher\Send-CodesysRequest.ps1 add-gvl-var -Gvl GVL -Var xTest -Type BOOL
 ```
+
+### Non-blocking operation and stopping the agent
+
+`run_in_ide_agent.py` does not keep the CODESYS scripting command open. It
+registers a timer on the CODESYS user-interface thread and then returns. The
+timer checks the mailbox every 500 milliseconds, so CODESYS remains usable
+while the agent is idle. An individual edit, save, or build request can still
+make CODESYS briefly busy while that operation executes.
+
+To stop the default agent from the repository root, run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File .\launcher\Send-CodesysRequest.ps1 `
+  stop
+```
+
+If the PowerShell prompt is already inside the `ide_scripts` directory, use
+`..\launcher` instead:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File ..\launcher\Send-CodesysRequest.ps1 `
+  stop
+```
+
+The agent normally detects the stop file within 500 milliseconds, detaches its
+timer, and prints `CODESYS in-IDE agent stopped: default`. This does not close
+CODESYS, close the project, or stop the separate MCP bridge. To start the agent
+again, execute `ide_scripts\run_in_ide_agent.py` inside CODESYS.
 
 For two open CODESYS instances, run one named watcher in each instance:
 
@@ -82,12 +113,6 @@ Application commands are also exposed:
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\launcher\Send-CodesysRequest.ps1 application-command -AppCommand build
 powershell -NoProfile -ExecutionPolicy Bypass -File .\launcher\Send-CodesysRequest.ps1 application-command -AppCommand rebuild
-```
-
-To stop the in-IDE watcher:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\launcher\Send-CodesysRequest.ps1 stop
 ```
 
 The first edit action is idempotent: it creates `GVL` under the active application if needed, ensures `xTest : BOOL;` exists in its declaration, and saves the project unless `-NoSave` is passed.
@@ -156,7 +181,7 @@ Set-Location ..
 2. Open the project that AnythingLLM should control.
 3. In CODESYS, select **Tools > Scripting > Execute Script File**.
 4. Select `ide_scripts\run_in_ide_agent.py` from this repository.
-5. Leave that agent running inside the same CODESYS instance.
+5. Confirm that the script finishes and the CODESYS user interface becomes available again. The registered agent remains active inside that instance.
 
 Do not run `run_in_ide_agent.py` from PowerShell and do not start a second
 CODESYS instance from the launcher.
@@ -173,6 +198,10 @@ powershell -NoProfile -ExecutionPolicy Bypass `
 The JSON response must contain `"ok": true`, the expected `project_path`, and
 the expected `active_application`. Fix this local connection before working on
 MCP or the firewall.
+
+The idle agent does not hold the scripting command open. CODESYS may still be
+briefly busy while an actual request is editing, saving, or building a project,
+because those operations execute on the CODESYS user-interface thread.
 
 Optionally exercise the real read-only MCP flow locally:
 
