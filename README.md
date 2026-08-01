@@ -311,7 +311,7 @@ Do not create an unrestricted inbound rule and do not expose port `8765` to the
 public Internet. Use a VPN or an authenticated HTTPS reverse proxy if the two
 computers are not on the same trusted LAN.
 
-### 5. Start the Windows bridge in read-only mode
+### 5. Start the Windows bridge with write and build tools
 
 Use a normal, non-administrator PowerShell window from the repository's
 `mcp-server` directory. Keep the API key in the same process environment:
@@ -322,8 +322,8 @@ Set-Location C:\Tools\thecodesysvibecoder\mcp-server
 $WindowsIp = "<WINDOWS_PC_IP_ADDRESS>"
 $env:CODESYS_MCP_HOST = "0.0.0.0"
 $env:CODESYS_MCP_ALLOWED_HOSTS = "$WindowsIp,$env:COMPUTERNAME"
-$env:CODESYS_MCP_ALLOW_WRITE = "false"
-$env:CODESYS_MCP_ALLOW_BUILD = "false"
+$env:CODESYS_MCP_ALLOW_WRITE = "true"
+$env:CODESYS_MCP_ALLOW_BUILD = "true"
 
 Remove-Item Env:CODESYS_MCP_ALLOWED_IPS -ErrorAction SilentlyContinue
 
@@ -337,8 +337,12 @@ Expected output:
 
 ```text
 CODESYS MCP bridge listening at http://0.0.0.0:8765/mcp (SSE fallback: /sse)
-Tools: read-only enabled; write=false; build=false; agent=default
+Tools: read-only enabled; write=true; build=true; agent=default
 ```
+
+The recommended startup profile always enables both write and build tools.
+Possession of the API key grants access to every enabled tool, so keep the key
+secret and retain the narrowly scoped Windows Firewall rule.
 
 Keep this PowerShell window open. `Ctrl+C` stops only the MCP bridge; it does not
 stop CODESYS or the in-IDE agent.
@@ -530,6 +534,36 @@ authentication. HTTP `401` means the two configured keys do not match.
 
 ### 9. Configure the remote MCP server in AnythingLLM
 
+On Windows, copy the API key without printing it. If the key was generated in
+the current PowerShell window, use:
+
+```powershell
+$McpApiKey | Set-Clipboard
+```
+
+If the key was persisted earlier and this is a new PowerShell window, load,
+validate, and copy it with:
+
+```powershell
+$McpApiKey = [Environment]::GetEnvironmentVariable(
+  "CODESYS_MCP_API_KEY",
+  "User"
+)
+
+if ([string]::IsNullOrWhiteSpace($McpApiKey) -or $McpApiKey.Length -lt 32) {
+  throw "A valid persisted CODESYS_MCP_API_KEY was not found."
+}
+
+$McpApiKey | Set-Clipboard
+```
+
+`Set-Clipboard` produces no output. Paste the value into the `X-API-Key`
+field shown below, replacing the placeholder. When Ubuntu is managed through
+an SSH terminal on Windows, the Windows clipboard can be pasted directly into
+the terminal editor. If the computers do not share a clipboard, transfer the
+key through a trusted encrypted channel such as a password manager; do not send
+it through email or chat.
+
 For the Compose layout above, edit:
 
 ```bash
@@ -571,6 +605,12 @@ python3 -m json.tool \
   >/dev/null
 ```
 
+After the key has been pasted and the file saved, clear the Windows clipboard:
+
+```powershell
+Set-Clipboard -Value ""
+```
+
 Restart AnythingLLM so it reloads the file:
 
 ```bash
@@ -602,40 +642,26 @@ supports:
 
 Prefer Streamable HTTP at `/mcp` for a new installation.
 
-### 10. Test read-only operation
+### 10. Test the connection before making changes
 
-Initially the MCP server exposes only:
+With the recommended startup profile, the MCP server exposes all supported
+read, write, and build tools listed in the next section.
 
-- `inspect_project`
-- `inspect_tree`
-- `read_object`
-
-Use AnythingLLM agent mode and ask:
+Although write and build tools are enabled, make the first test request
+read-only. Use AnythingLLM agent mode and ask:
 
 ```text
 Inspect the active CODESYS project, show the project path and active
 application, inspect the tree to depth 3, and do not modify anything.
 ```
 
-Compare the response with the project visibly open in CODESYS. Do not enable
-writes until the correct project is consistently selected.
+Compare the response with the project visibly open in CODESYS. Do not request
+changes until the correct project is consistently selected.
 
-### 11. Enable write and build tools
+### 11. Write and build permissions
 
-On Windows, stop the MCP bridge with `Ctrl+C`. Do not stop the in-IDE agent.
-Then restart the bridge from `mcp-server` with:
-
-```powershell
-$env:CODESYS_MCP_ALLOW_WRITE = "true"
-$env:CODESYS_MCP_ALLOW_BUILD = "true"
-
-powershell -NoProfile -ExecutionPolicy Bypass `
-  -File .\Start-CodesysMcpBridge.ps1 `
-  -ListenAddress 0.0.0.0 `
-  -Port 8765
-```
-
-Expected permission line:
+The startup commands in this README always set both permission variables to
+`"true"`. Confirm this line whenever the bridge starts:
 
 ```text
 Tools: read-only enabled; write=true; build=true; agent=default
@@ -643,12 +669,6 @@ Tools: read-only enabled; write=true; build=true; agent=default
 
 No additional approval credential is needed. Possession of the API key grants
 access to every tool enabled by these startup flags.
-
-Restart AnythingLLM and begin a new agent chat:
-
-```bash
-sudo docker restart anythingllm
-```
 
 The complete enabled tool set is:
 
@@ -727,14 +747,14 @@ $env:CODESYS_MCP_API_KEY.Length
 
 The length must be at least `32`; a key generated by step 3 prints `64`.
 
-5. Set the Windows address and desired tool permissions, then start the MCP
-   bridge:
+5. Set the Windows address and enable the write and build permissions, then
+   start the MCP bridge:
 
 ```powershell
 $WindowsIp = "<WINDOWS_PC_IP_ADDRESS>"
 $env:CODESYS_MCP_ALLOWED_HOSTS = "$WindowsIp,$env:COMPUTERNAME"
-$env:CODESYS_MCP_ALLOW_WRITE = "false"
-$env:CODESYS_MCP_ALLOW_BUILD = "false"
+$env:CODESYS_MCP_ALLOW_WRITE = "true"
+$env:CODESYS_MCP_ALLOW_BUILD = "true"
 
 Remove-Item Env:CODESYS_MCP_ALLOWED_IPS -ErrorAction SilentlyContinue
 
@@ -745,8 +765,7 @@ powershell -NoProfile -ExecutionPolicy Bypass `
   -Port 8765
 ```
 
-The example starts in read-only mode. Set the write and build variables to
-`"true"` only when those tools are intentionally required. Keep this
+The normal startup profile enables both write and build tools. Keep this
 PowerShell window open; `Ctrl+C` stops the bridge.
 
 #### B. Start Ollama and AnythingLLM on Ubuntu
@@ -833,7 +852,7 @@ file is inside the host directory mapped to `/app/server/storage/plugins`.
 
 #### Only read tools appear
 
-Set `CODESYS_MCP_ALLOW_WRITE=true` and optionally
+Set both `CODESYS_MCP_ALLOW_WRITE=true` and
 `CODESYS_MCP_ALLOW_BUILD=true` before starting the Windows bridge. Restart both
 the bridge and AnythingLLM, then use a new agent chat.
 

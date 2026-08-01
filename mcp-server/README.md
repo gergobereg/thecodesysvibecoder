@@ -7,8 +7,9 @@ only named MCP tools and translates them into calls to
 ## Safety model
 
 - `CODESYS_MCP_API_KEY` is mandatory and must contain at least 32 characters.
-- Only `inspect_project`, `inspect_tree`, and `read_object` are exposed by
-  default.
+- The recommended startup profile in this README enables write and build tools.
+  If the permission variables are omitted, only `inspect_project`,
+  `inspect_tree`, and `read_object` are exposed.
 - Write tools appear only when `CODESYS_MCP_ALLOW_WRITE=true`.
 - The build tool appears only when `CODESYS_MCP_ALLOW_BUILD=true`.
 - The authenticated MCP connection is the authorization boundary. Enabled
@@ -83,6 +84,8 @@ $env:CODESYS_MCP_API_KEY.Length
 For a first local-only test:
 
 ```powershell
+$env:CODESYS_MCP_ALLOW_WRITE = "true"
+$env:CODESYS_MCP_ALLOW_BUILD = "true"
 .\Start-CodesysMcpBridge.ps1
 ```
 
@@ -92,6 +95,8 @@ restrict the accepted Host header:
 ```powershell
 $env:CODESYS_MCP_HOST = "0.0.0.0"
 $env:CODESYS_MCP_ALLOWED_HOSTS = "<WINDOWS_PC_IP_ADDRESS>,<WINDOWS_HOSTNAME>"
+$env:CODESYS_MCP_ALLOW_WRITE = "true"
+$env:CODESYS_MCP_ALLOW_BUILD = "true"
 Remove-Item Env:CODESYS_MCP_ALLOWED_IPS -ErrorAction SilentlyContinue
 .\Start-CodesysMcpBridge.ps1
 ```
@@ -121,10 +126,41 @@ curl -i -H "X-API-Key: YOUR_RANDOM_SECRET" \
 
 ## Configure AnythingLLM on Ubuntu
 
+Copy the API key on Windows without printing it. In the same PowerShell window
+that generated the key, use:
+
+```powershell
+$McpApiKey | Set-Clipboard
+```
+
+In a later PowerShell window, load the persisted key before copying it:
+
+```powershell
+$McpApiKey = [Environment]::GetEnvironmentVariable(
+  "CODESYS_MCP_API_KEY",
+  "User"
+)
+
+if ([string]::IsNullOrWhiteSpace($McpApiKey) -or $McpApiKey.Length -lt 32) {
+  throw "A valid persisted CODESYS_MCP_API_KEY was not found."
+}
+
+$McpApiKey | Set-Clipboard
+```
+
 Copy the `codesys` entry from `anythingllm-mcp.example.json` into
 AnythingLLM's `anythingllm_mcp_servers.json`, replacing the Windows IP and API
 key. For Docker installations this file is normally in the mounted AnythingLLM
 storage directory under `plugins/`.
+
+Paste the copied value in place of `YOUR_RANDOM_SECRET`. If the Ubuntu computer
+does not share the Windows clipboard, transfer the key through a trusted
+encrypted channel such as a password manager. After saving the configuration,
+clear the Windows clipboard:
+
+```powershell
+Set-Clipboard -Value ""
+```
 
 Current AnythingLLM releases use a Streamable HTTP entry pointing to `/mcp`.
 Some releases call the type `streamableHTTP` instead of `streamable`. If the
@@ -163,24 +199,20 @@ The bridge also provides the older AnythingLLM-compatible SSE transport:
 Restart AnythingLLM or reload its MCP servers, then enable the CODESYS tools for
 the intended workspace.
 
-## Enable controlled changes later
+## Recommended write and build profile
 
-Keep the first connection read-only until Gemma reliably follows the inspection
-workflow. To enable editing in a new PowerShell session:
+Set both permission variables to `"true"` in every normal bridge PowerShell
+session:
 
 ```powershell
 $env:CODESYS_MCP_ALLOW_WRITE = "true"
+$env:CODESYS_MCP_ALLOW_BUILD = "true"
 .\Start-CodesysMcpBridge.ps1 -ListenAddress 0.0.0.0
 ```
 
-To enable build/rebuild as well:
-
-```powershell
-$env:CODESYS_MCP_ALLOW_BUILD = "true"
-```
-
-Restart the bridge whenever permissions change. A recommended prompt policy for
-the AnythingLLM workspace is:
+The bridge registers its tool list at startup, so restart it whenever
+permissions change. A recommended prompt policy for the AnythingLLM workspace
+is:
 
 ```text
 Always inspect the active project first. Read every affected object before
@@ -193,7 +225,11 @@ Never claim a change succeeded unless the CODESYS tool result says ok=true.
 
 ## Environment variables
 
-| Variable | Default | Purpose |
+The table records the bridge's built-in fallback when a variable is omitted.
+The recommended startup commands above explicitly set both permission variables
+to `"true"`.
+
+| Variable | Built-in fallback | Purpose |
 | --- | --- | --- |
 | `CODESYS_MCP_API_KEY` | required | MCP HTTP authentication secret |
 | `CODESYS_MCP_HOST` | `127.0.0.1` | Listen address |
