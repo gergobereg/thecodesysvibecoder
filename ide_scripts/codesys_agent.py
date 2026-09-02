@@ -1948,6 +1948,131 @@ def _inspect_libraries(request):
     }
 
 
+def _library_name(resolution):
+    return str(resolution or "").split(",", 1)[0].strip()
+
+
+def _library_version_key(library):
+    version = str(_get_plain_attr(library, "version") or "")
+    parts = []
+    for part in version.split("."):
+        try:
+            parts.append(int(part))
+        except Exception:
+            parts.append(0)
+    return tuple(parts)
+
+
+def _resolve_installed_library(requested_resolution):
+    requested = str(requested_resolution or "").strip()
+    if not requested:
+        raise Exception("A non-empty library name or resolution is required.")
+
+    installed = list(librarymanager.get_all_libraries(False))
+    exact = [
+        library
+        for library in installed
+        if str(library).lower() == requested.lower()
+    ]
+    if exact:
+        return exact[0]
+
+    requested_name = _library_name(requested).lower()
+    named = [
+        library
+        for library in installed
+        if _library_name(str(library)).lower() == requested_name
+    ]
+    if named:
+        named.sort(key=_library_version_key, reverse=True)
+        return named[0]
+
+    suggestions = sorted([
+        str(library)
+        for library in installed
+        if requested_name in _library_name(str(library)).lower()
+    ])[:10]
+    detail = ""
+    if suggestions:
+        detail = " Similar installed libraries: %s." % "; ".join(suggestions)
+    raise Exception("Installed library '%s' was not found.%s" % (requested, detail))
+
+
+def _direct_library_resolutions(libman):
+    return [
+        str(item)
+        for item in libman.get_libraries(False)
+        if not str(item).startswith("#")
+    ]
+
+
+def _matching_direct_library(existing, requested, resolved=None):
+    requested_text = str(requested or "").strip()
+    resolved_text = str(resolved or "").strip()
+    for candidate in existing:
+        if candidate.lower() == requested_text.lower():
+            return candidate
+        if resolved_text and candidate.lower() == resolved_text.lower():
+            return candidate
+        if "," not in requested_text and (
+            _library_name(candidate).lower() == requested_text.lower()
+        ):
+            return candidate
+    return None
+
+
+def _ensure_fixed_library_references(libman, requested_libraries):
+    existing = _direct_library_resolutions(libman)
+    results = []
+    for requested_value in requested_libraries:
+        requested = str(requested_value).strip()
+        managed = _resolve_installed_library(requested)
+        resolved = str(managed)
+        matched = _matching_direct_library(existing, requested, resolved)
+        created = matched is None
+        if created:
+            libman.add_library(managed)
+            existing = _direct_library_resolutions(libman)
+            matched = _matching_direct_library(existing, requested, resolved)
+            if matched is None:
+                raise Exception(
+                    "CODESYS accepted library '%s' but no direct reference appeared."
+                    % resolved
+                )
+        results.append({
+            "requested": requested,
+            "resolved": resolved,
+            "reference": matched,
+            "created": created,
+        })
+    return results
+
+
+def _ensure_library_references(request):
+    project = _get_primary_project(request)
+    container = _target_container(project, request)
+    libman = container.get_library_manager()
+    requested = request.get("libraries", request.get("references", []))
+    if not requested:
+        raise Exception("ensure_library_references requires a non-empty 'libraries' list.")
+
+    results = _ensure_fixed_library_references(libman, requested)
+    changed = any(result["created"] for result in results)
+    saved = False
+    if request.get("save", True) and (changed or project.dirty):
+        project.save()
+        saved = True
+
+    return {
+        "project_path": _project_path(project),
+        "container": _object_name(container),
+        "library_manager": _object_name(libman),
+        "libraries": results,
+        "direct_references": _direct_library_resolutions(libman),
+        "saved": saved,
+    }
+
+
 def _ensure_library_placeholders(request):
     project = _get_primary_project(request)
     container = _target_container(project, request)
@@ -1962,10 +2087,7 @@ def _ensure_library_placeholders(request):
     for spec in request.get("placeholders", []):
         name = str(spec["name"])
         resolution = str(spec["resolution"])
-        found = librarymanager.find_library(resolution)
-        if found is None or len(found) < 1:
-            raise Exception("Installed library '%s' was not found." % resolution)
-        managed = found[0]
+        managed = _resolve_installed_library(resolution)
 
         if name in existing:
             reference = existing[name]
@@ -2002,21 +2124,10 @@ def _ensure_library_placeholders(request):
             ),
         })
 
-    fixed_results = []
-    current_libraries = [str(item) for item in libman.get_libraries(False)]
-    for resolution_value in request.get("libraries", []):
-        resolution = str(resolution_value)
-        found = librarymanager.find_library(resolution)
-        if found is None or len(found) < 1:
-            raise Exception("Installed library '%s' was not found." % resolution)
-        created = resolution not in current_libraries
-        if created:
-            libman.add_library(found[0])
-            current_libraries.append(resolution)
-        fixed_results.append({
-            "resolution": resolution,
-            "created": created,
-        })
+    fixed_results = _ensure_fixed_library_references(
+        libman,
+        request.get("libraries", []),
+    )
 
     saved = False
     if request.get("save", True):
@@ -2037,16 +2148,18 @@ def _remove_library_references(request):
     project = _get_primary_project(request)
     container = _target_container(project, request)
     libman = container.get_library_manager()
-    existing = [str(item) for item in libman.get_libraries(False)]
+    existing = _direct_library_resolutions(libman)
     results = []
     for name_value in request.get("libraries", []):
         name = str(name_value)
-        removed = name in existing
-        if removed:
-            libman.remove_library(name)
-            existing.remove(name)
+        matched = _matching_direct_library(existing, name)
+        removed = matched is not None
+        if matched is not None:
+            libman.remove_library(matched)
+            existing = _direct_library_resolutions(libman)
         results.append({
             "name": name,
+            "reference": matched,
             "removed": removed,
         })
 
@@ -2765,6 +2878,12 @@ def handle_request(request):
             "ok": True,
             "action": action,
             "data": _inspect_libraries(request),
+        }
+    if action == "ensure_library_references":
+        return {
+            "ok": True,
+            "action": action,
+            "data": _ensure_library_references(request),
         }
     if action == "ensure_library_placeholders":
         return {

@@ -42,6 +42,7 @@ const supportedAgentActions = [
   "upsert_object",
   "upsert_visualization",
   "inspect_libraries",
+  "ensure_library_references",
   "ensure_library_placeholders",
   "remove_library_references",
   "configure_library_redirections",
@@ -344,7 +345,8 @@ export function registerCodesysTools(server, bridge, config) {
       description:
         "Pass an action and its parameters directly to the in-IDE CODESYS agent without per-action restrictions or validation. " +
         `Current actions: ${supportedAgentActions.join(", ")}. ` +
-        "Parameter names are the keys read by ide_scripts/codesys_agent.py. Paths refer to the Windows computer running CODESYS, not the remote MCP client.",
+        'For a managed/fixed library reference, use ensure_library_references with parameters {"libraries":["Standard"]}. ' +
+        "Other parameter names are the keys read by ide_scripts/codesys_agent.py. Paths refer to the Windows computer running CODESYS, not the remote MCP client.",
       inputSchema: {
         action: z
           .string()

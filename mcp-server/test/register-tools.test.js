@@ -103,6 +103,11 @@ test("raw action tool forwards every parameter without permission gating", async
     action: "application_command",
     parameters: { command: "clean", clear_messages: false },
   });
+  assert.ok(toolInternals.supportedAgentActions.includes("ensure_library_references"));
+  assert.match(
+    tools.get("execute_codesys_action").options.description,
+    /\{"libraries":\["Standard"\]\}/,
+  );
 });
 
 test("upsert rejects empty executable objects before calling CODESYS", async () => {

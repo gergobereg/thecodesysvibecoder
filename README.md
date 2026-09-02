@@ -108,6 +108,17 @@ For requests that do not have a dedicated command yet, send raw JSON:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\launcher\Send-CodesysRequest.ps1 send-json -RequestJson .\tmp\request.json
 ```
 
+For example, the raw `ensure_library_references` action adds an installed
+managed/fixed library by its short name or full resolution:
+
+```json
+{
+  "action": "ensure_library_references",
+  "libraries": ["Standard"],
+  "save": true
+}
+```
+
 Application commands are also exposed:
 
 ```powershell
