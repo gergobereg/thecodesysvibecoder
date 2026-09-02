@@ -72,6 +72,24 @@ export class CodesysBridge {
     return this.#enqueue(() => this.#invoke("inspect", ["-NoProjectPathMatch"]));
   }
 
+  executeAgentAction({ action, parameters = {} }) {
+    const request = {
+      ...parameters,
+      action: validateText(action, "action", 256),
+    };
+
+    return this.#enqueue(async () => {
+      const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "codesys-mcp-raw-"));
+      try {
+        const requestPath = path.join(temporaryDirectory, "request.json");
+        await writeFile(requestPath, JSON.stringify(request), "utf8");
+        return await this.#invoke("send-json", ["-RequestJson", requestPath]);
+      } finally {
+        await rm(temporaryDirectory, { recursive: true, force: true });
+      }
+    });
+  }
+
   inspectTree({ depth = 3, root = "", includeText = false } = {}) {
     return this.#withActiveProject("inspect-tree", async (projectPath) => {
       const argumentsList = ["-Project", projectPath, "-Depth", String(depth)];

@@ -148,7 +148,7 @@ export async function startServer(config = loadConfig()) {
     `CODESYS MCP bridge listening at http://${config.host}:${config.port}/mcp (SSE fallback: /sse)`,
   );
   console.log(
-    `Tools: read-only enabled; write=${config.allowWrite}; build=${config.allowBuild}; agent=${config.agent || "default"}`,
+    `Tools: raw action enabled; named read-only enabled; write=${config.allowWrite}; build=${config.allowBuild}; agent=${config.agent || "default"}`,
   );
 
   const shutdown = async () => {

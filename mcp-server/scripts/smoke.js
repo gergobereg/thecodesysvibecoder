@@ -29,7 +29,10 @@ async function verifyTransport(label, transport) {
     await client.connect(transport);
     const tools = await client.listTools();
     const toolNames = tools.tools.map((tool) => tool.name).sort();
-    if (toolNames.join(",") !== "inspect_project,inspect_tree,read_object") {
+    if (
+      toolNames.join(",") !==
+      "execute_codesys_action,inspect_project,inspect_tree,read_object"
+    ) {
       throw new Error(`${label} exposed unexpected tools: ${toolNames.join(", ")}`);
     }
 
@@ -38,6 +41,20 @@ async function verifyTransport(label, transport) {
     const payload = JSON.parse(text);
     if (payload.ok !== true || !payload.data?.project_path) {
       throw new Error(`${label} inspect_project returned an invalid result.`);
+    }
+
+    const rawResult = await client.callTool({
+      name: "execute_codesys_action",
+      arguments: {
+        action: "inspect",
+        parameters: { require_project_path_match: false },
+      },
+    });
+    const rawPayload = JSON.parse(
+      rawResult.content.find((item) => item.type === "text")?.text,
+    );
+    if (rawPayload.ok !== true || rawPayload.action !== "inspect") {
+      throw new Error(`${label} execute_codesys_action returned an invalid result.`);
     }
 
     if (label === "streamable-http") {

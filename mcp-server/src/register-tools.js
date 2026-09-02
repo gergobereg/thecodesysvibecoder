@@ -20,6 +20,48 @@ const genericObjectKinds = objectKinds.filter(
   (kind) => !executableObjectKinds.has(kind),
 );
 
+const supportedAgentActions = [
+  "inspect",
+  "inspect_tree",
+  "read_object",
+  "export_object_text_files",
+  "update_object_text_files",
+  "describe_object",
+  "describe_device_details",
+  "export_object_xml",
+  "import_object_xml",
+  "describe_script_symbol",
+  "describe_device_parameters",
+  "export_device_internal_config",
+  "import_device_internal_config",
+  "describe_device_driver_info",
+  "set_device_parameter_value",
+  "set_device_diagnosis_enabled",
+  "delete_objects",
+  "add_gvl_var",
+  "upsert_object",
+  "upsert_visualization",
+  "inspect_libraries",
+  "ensure_library_placeholders",
+  "remove_library_references",
+  "configure_library_redirections",
+  "inspect_device_versions",
+  "update_device_version",
+  "upsert_function_block",
+  "rename_object",
+  "set_device_enabled",
+  "sync_device_enabled_from_uint_constant",
+  "application_command",
+  "inspect_build_properties",
+  "ensure_compiler_defines",
+  "project_check_all_pool_objects",
+  "online_status",
+  "online_login",
+  "online_control",
+  "online_read",
+  "online_write",
+];
+
 function normalizeText(value) {
   return String(value ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
 }
@@ -295,6 +337,40 @@ export function registerCodesysTools(server, bridge, config) {
     guarded("read_object", ({ name }) => bridge.readObject({ name })),
   );
 
+  server.registerTool(
+    "execute_codesys_action",
+    {
+      title: "Execute any CODESYS agent action",
+      description:
+        "Pass an action and its parameters directly to the in-IDE CODESYS agent without per-action restrictions or validation. " +
+        `Current actions: ${supportedAgentActions.join(", ")}. ` +
+        "Parameter names are the keys read by ide_scripts/codesys_agent.py. Paths refer to the Windows computer running CODESYS, not the remote MCP client.",
+      inputSchema: {
+        action: z
+          .string()
+          .min(1)
+          .max(256)
+          .describe("The exact CODESYS agent action name."),
+        parameters: z
+          .record(z.string(), z.unknown())
+          .optional()
+          .default({})
+          .describe(
+            "The remaining raw request fields for the action. Do not repeat the action key here.",
+          ),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+    },
+    guarded("execute_codesys_action", ({ action, parameters }) =>
+      bridge.executeAgentAction({ action, parameters }),
+    ),
+  );
+
   if (config.allowWrite) {
     registerExecutableTool(
       server,
@@ -448,6 +524,7 @@ export const toolInternals = {
   genericObjectKinds,
   prepareUpsertArguments,
   objectKinds,
+  supportedAgentActions,
   toolError,
   toolResult,
   verifyExecutableWrite,

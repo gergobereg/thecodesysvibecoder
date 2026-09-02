@@ -18,6 +18,11 @@ try:
 except NameError:
     string_types = (str,)
 
+try:
+    text_type = unicode
+except NameError:
+    text_type = str
+
 
 def _is_callable(value):
     try:
@@ -36,8 +41,13 @@ def _plain(value):
         return converted
     if isinstance(value, (list, tuple)):
         return [_plain(item) for item in value]
-    if isinstance(value, string_types):
-        return str(value)
+    if isinstance(value, text_type):
+        return value
+    if isinstance(value, str):
+        try:
+            return value.decode("utf-8")
+        except Exception:
+            return value.decode("cp1252", "replace")
     if isinstance(value, (bool, int, float)):
         return value
     return str(value)
@@ -168,6 +178,86 @@ def _implementation_text(obj):
     return str(text).replace("\r\n", "\n").replace("\r", "\n")
 
 
+def _decode_text(value):
+    if value is None:
+        return u""
+    try:
+        if isinstance(value, unicode):
+            return value
+    except NameError:
+        return str(value)
+    if isinstance(value, str):
+        try:
+            return value.decode("utf-8")
+        except Exception:
+            return value.decode("cp1252", "replace")
+    return unicode(value)
+
+
+def _write_utf8(path, text):
+    directory = os.path.dirname(path)
+    if directory and not os.path.isdir(directory):
+        os.makedirs(directory)
+    with open(path, "wb") as handle:
+        handle.write(_decode_text(text).encode("utf-8"))
+
+
+def _read_utf8(path):
+    with open(path, "rb") as handle:
+        return handle.read().decode("utf-8")
+
+
+def _export_object_text_files(request):
+    project = _get_primary_project(request)
+    name = request["object_name"]
+    obj = _find_descendant_by_name(project, name)
+    if obj is None:
+        raise Exception("Object '%s' was not found." % name)
+
+    output_dir = request["output_dir"]
+    declaration_path = os.path.join(output_dir, name + ".decl.st")
+    implementation_path = os.path.join(output_dir, name + ".impl.st")
+    _write_utf8(declaration_path, _declaration_text(obj))
+    _write_utf8(implementation_path, _implementation_text(obj))
+    return {
+        "project_path": _project_path(project),
+        "object_name": name,
+        "declaration_path": declaration_path,
+        "implementation_path": implementation_path,
+    }
+
+
+def _update_object_text_files(request):
+    project = _get_primary_project(request)
+    name = request["object_name"]
+    obj = _find_descendant_by_name(project, name)
+    if obj is None:
+        raise Exception("Object '%s' was not found." % name)
+
+    declaration = _read_utf8(request["declaration_path"])
+    implementation = _read_utf8(request["implementation_path"])
+    changed_declaration = _decode_text(_declaration_text(obj)).strip() != declaration.strip()
+    changed_implementation = _decode_text(_implementation_text(obj)).strip() != implementation.strip()
+    if changed_declaration:
+        _set_declaration_text(obj, declaration.strip())
+    if changed_implementation:
+        _set_implementation_text(obj, implementation.strip())
+
+    saved = False
+    if request.get("save", True) and (
+        changed_declaration or changed_implementation or project.dirty
+    ):
+        project.save()
+        saved = True
+    return {
+        "project_path": _project_path(project),
+        "object_name": name,
+        "changed_declaration": changed_declaration,
+        "changed_implementation": changed_implementation,
+        "saved": saved,
+    }
+
+
 def _set_implementation_text(obj, text):
     obj.textual_implementation.replace(new_text=text)
 
@@ -240,13 +330,31 @@ def _extract_uint_constant(text, const_name):
     return int(match.group(1))
 
 
+def _create_pou_object(
+    container,
+    name,
+    pou_type,
+    return_type="",
+    base_type="",
+    interfaces="",
+):
+    if not hasattr(container, "create_pou"):
+        raise Exception("Container '%s' cannot create POU objects." % _object_name(container))
+    return container.create_pou(
+        name,
+        pou_type,
+        None,
+        str(return_type or ""),
+        str(base_type or ""),
+        str(interfaces or ""),
+    )
+
+
 def _ensure_function_block(container, fb_name):
     existing = _find_child_by_name(container, fb_name)
     if existing is not None:
         return existing, False
-    if not hasattr(container, "create_function_block"):
-        raise Exception("Container '%s' cannot create function block objects." % _object_name(container))
-    return container.create_function_block(fb_name), True
+    return _create_pou_object(container, fb_name, PouType.FunctionBlock), True
 
 
 def _safe_texts(obj):
@@ -351,18 +459,25 @@ def _create_object(container, kind, name, request):
     if normalized in ["persistent_gvl", "persistentvars", "persistent_variables"]:
         return container.create_persistentvars(name)
     if normalized == "program":
-        return container.create_program(name)
+        return _create_pou_object(container, name, PouType.Program)
     if normalized in ["function_block", "fb"]:
-        return container.create_function_block(
+        return _create_pou_object(
+            container,
             name,
-            base_type=request.get("base_type"),
-            interfaces=request.get("interfaces"),
+            PouType.FunctionBlock,
+            base_type=request.get("base_type", ""),
+            interfaces=request.get("interfaces", ""),
         )
     if normalized == "function":
         return_type = request.get("return_type")
         if not return_type:
             raise Exception("Creating a function requires 'return_type'.")
-        return container.create_function(name, return_type)
+        return _create_pou_object(
+            container,
+            name,
+            PouType.Function,
+            return_type=return_type,
+        )
     if normalized == "dut":
         return container.create_dut(
             name,
@@ -391,7 +506,10 @@ def _ensure_object(container, kind, name, request):
 
 def _inspect(request):
     project = _get_primary_project(request)
-    app = project.active_application
+    try:
+        app = project.active_application
+    except Exception:
+        app = None
     return {
         "project_path": _project_path(project),
         "project_dirty": bool(project.dirty),
@@ -1548,6 +1666,539 @@ def _upsert_object(request):
     return result
 
 
+def _visual_element_type(name):
+    normalized = str(name or "").replace(" ", "").replace("-", "").replace("_", "").lower()
+    for candidate in [
+        "Rectangle",
+        "RoundedRectangle",
+        "Ellipse",
+        "Polygon",
+        "Polyline",
+        "BezierCurve",
+        "Line",
+        "Button",
+        "Image",
+        "Pie",
+        "Frame",
+        "Lamp",
+        "RotarySwitch",
+        "ImageSwitcher",
+        "DipSwitch",
+        "PushSwitch",
+        "PushSwitchLed",
+        "RockerSwitch",
+        "PowerSwitch",
+    ]:
+        if candidate.lower() == normalized:
+            return getattr(VisualElementType, candidate)
+    raise Exception("Unsupported visualization element type '%s'." % name)
+
+
+def _visual_event_type(name):
+    normalized = str(name or "OnMouseClick").replace(" ", "").replace("-", "").replace("_", "").lower()
+    for candidate in [
+        "OnMouseClick",
+        "OnMouseDown",
+        "OnMouseUp",
+        "OnMouseMove",
+        "OnMouseEnter",
+        "OnMouseLeave",
+        "OnValueChanged",
+        "OnDialogClosed",
+    ]:
+        if candidate.lower() == normalized:
+            return getattr(InputActionEventType, candidate)
+    raise Exception("Unsupported visualization input event '%s'." % name)
+
+
+def _visual_properties(spec):
+    properties = spec.get("properties", [])
+    if isinstance(properties, dict):
+        return [
+            {
+                "path": path,
+                "value": value,
+            }
+            for path, value in properties.items()
+        ]
+    return list(properties)
+
+
+def _create_visual_input_action(factory, spec):
+    action_type = str(spec.get("type", "")).replace("-", "_").lower()
+    if action_type in ["execute_st_code", "execute_st", "st"]:
+        return factory.create_execute_st_code(str(spec["code"]))
+    if action_type in ["write_variable", "write"]:
+        return factory.create_write_variable(
+            str(spec.get("variable", "")),
+            str(spec.get("input_type", "Default")),
+            str(spec.get("minimum", "")),
+            str(spec.get("maximum", "")),
+            str(spec.get("dialog_title", "")),
+            bool(spec.get("password_input", False)),
+            bool(spec.get("use_text_output_variable", False)),
+        )
+    if action_type in ["write_variable_default", "write_default"]:
+        return factory.create_write_variable_default()
+    raise Exception("Unsupported visualization input action type '%s'." % spec.get("type"))
+
+
+def _upsert_visualization(request):
+    project = _get_primary_project(request)
+    container = _target_container(project, request)
+    name = request["object_name"]
+    visu = _find_child_by_name(container, name)
+    created = False
+    if visu is None:
+        visu = container.create_visualobject(name)
+        created = True
+
+    element_list = visu.visual_element_list
+    existing_elements = list(element_list)
+    results = []
+    errors = []
+    visu.begin_modify()
+    try:
+        if request.get("replace_elements", True):
+            for unused in existing_elements:
+                element_list.remove_at(0)
+
+        factory = visu.input_action_factory
+        for index, spec in enumerate(request.get("elements", [])):
+            element_result = {
+                "index": index,
+                "type": str(spec.get("type")),
+                "properties": [],
+                "actions": [],
+            }
+            element = element_list.add_element(_visual_element_type(spec.get("type")))
+            element_result["id"] = int(element.id)
+
+            for prop in _visual_properties(spec):
+                prop_result = {
+                    "path": str(prop.get("path")),
+                    "value": _plain(prop.get("value")),
+                }
+                try:
+                    element.set_property(str(prop["path"]), prop.get("value"))
+                    try:
+                        prop_result["read_back"] = _plain(element.get_property(str(prop["path"])))
+                    except Exception:
+                        pass
+                    prop_result["ok"] = True
+                except Exception as exc:
+                    prop_result["ok"] = False
+                    prop_result["error"] = str(exc)
+                    errors.append({
+                        "element_index": index,
+                        "property": str(prop.get("path")),
+                        "error": str(exc),
+                    })
+                element_result["properties"].append(prop_result)
+
+            for action_spec in spec.get("actions", []):
+                action_result = {
+                    "event": str(action_spec.get("event", "OnMouseClick")),
+                    "type": str(action_spec.get("type")),
+                }
+                try:
+                    action = _create_visual_input_action(factory, action_spec)
+                    element.add_input_action(
+                        action,
+                        _visual_event_type(action_spec.get("event", "OnMouseClick")),
+                    )
+                    action_result["ok"] = True
+                except Exception as exc:
+                    action_result["ok"] = False
+                    action_result["error"] = str(exc)
+                    errors.append({
+                        "element_index": index,
+                        "action": str(action_spec.get("type")),
+                        "event": str(action_spec.get("event", "OnMouseClick")),
+                        "error": str(exc),
+                    })
+                element_result["actions"].append(action_result)
+            results.append(element_result)
+    finally:
+        visu.end_modify()
+
+    if errors and request.get("strict", False):
+        raise Exception(
+            "Visualization '%s' contains %d configuration error(s): %s"
+            % (name, len(errors), json.dumps(_plain(errors)))
+        )
+
+    saved = False
+    if request.get("save", True):
+        project.save()
+        saved = True
+
+    return {
+        "project_path": _project_path(project),
+        "container": _object_name(container),
+        "visualization": _object_summary(visu, include_text=False),
+        "created": created,
+        "removed_element_count": len(existing_elements),
+        "element_count": len(results),
+        "elements": results,
+        "errors": errors,
+        "saved": saved,
+    }
+
+
+def _inspect_libraries(request):
+    project = _get_primary_project(request)
+    container = _target_container(project, request)
+    libman = container.get_library_manager()
+    queries = [
+        str(item).lower()
+        for item in request.get("queries", [])
+        if str(item).strip()
+    ]
+
+    installed = []
+    for library in librarymanager.get_all_libraries(not bool(request.get("all_versions", False))):
+        record = {
+            "repr": str(library),
+            "type": str(type(library)),
+            "attrs": {},
+        }
+        searchable = [record["repr"].lower()]
+        for attr_name in [
+            "name",
+            "display_name",
+            "localized_name",
+            "version",
+            "company",
+            "default_namespace",
+            "placeholder",
+        ]:
+            payload = _safe_attr_value(library, attr_name)
+            record["attrs"][attr_name] = payload
+            value = _attr_payload_value(payload)
+            if value is not None:
+                searchable.append(str(value).lower())
+        haystack = " ".join(searchable)
+        if not queries or any(query in haystack for query in queries):
+            installed.append(record)
+
+    def reference_record(reference):
+        record = {
+            "repr": str(reference),
+            "type": str(type(reference)),
+            "attrs": {},
+        }
+        for attr_name in [
+            "id",
+            "name",
+            "namespace",
+            "system_library",
+            "is_placeholder",
+            "is_managed",
+            "placeholder_name",
+            "default_resolution",
+            "effective_resolution",
+            "resolution_info",
+        ]:
+            record["attrs"][attr_name] = _safe_attr_value(reference, attr_name)
+        return record
+
+    references = []
+    dependency_matches = []
+    visited_references = set()
+
+    def inspect_reference(reference, depth):
+        record = reference_record(reference)
+        name_value = _attr_payload_value(record["attrs"]["name"])
+        key = str(name_value or record["repr"])
+        if key in visited_references:
+            return
+        visited_references.add(key)
+
+        haystack = " ".join([
+            str(_attr_payload_value(payload) or "")
+            for payload in record["attrs"].values()
+        ]).lower()
+        if not queries or any(query in haystack for query in queries):
+            dependency_matches.append(record)
+
+        if depth <= 0:
+            return
+        try:
+            for dependency in reference.get_dependencies():
+                inspect_reference(dependency, depth - 1)
+        except Exception:
+            pass
+
+    try:
+        for reference in libman.references:
+            references.append(reference_record(reference))
+            inspect_reference(reference, int(request.get("dependency_depth", 6)))
+    except Exception:
+        pass
+
+    return {
+        "project_path": _project_path(project),
+        "container": _object_name(container),
+        "library_manager": _object_name(libman),
+        "libraries": _plain(list(libman.get_libraries(bool(request.get("recursive", False))))),
+        "references": references,
+        "dependency_matches": dependency_matches,
+        "installed_matches": installed,
+    }
+
+
+def _ensure_library_placeholders(request):
+    project = _get_primary_project(request)
+    container = _target_container(project, request)
+    libman = container.get_library_manager()
+    existing = {}
+    for reference in libman.references:
+        placeholder_name = _get_plain_attr(reference, "placeholder_name")
+        if placeholder_name:
+            existing[str(placeholder_name)] = reference
+
+    results = []
+    for spec in request.get("placeholders", []):
+        name = str(spec["name"])
+        resolution = str(spec["resolution"])
+        found = librarymanager.find_library(resolution)
+        if found is None or len(found) < 1:
+            raise Exception("Installed library '%s' was not found." % resolution)
+        managed = found[0]
+
+        if name in existing:
+            reference = existing[name]
+            before = _get_plain_attr(reference, "effective_resolution")
+            reference.set_redirection(resolution)
+            created = False
+        else:
+            libman.add_placeholder(name, managed)
+            created = True
+            reference = None
+            for candidate in libman.references:
+                if str(_get_plain_attr(candidate, "placeholder_name") or "") == name:
+                    reference = candidate
+                    break
+            before = None
+
+        if reference is not None:
+            reference.set_redirection(resolution)
+
+        results.append({
+            "name": name,
+            "resolution": resolution,
+            "created": created,
+            "effective_before": before,
+            "effective_after": (
+                _get_plain_attr(reference, "effective_resolution")
+                if reference is not None
+                else None
+            ),
+            "resolution_info": (
+                _get_plain_attr(reference, "resolution_info")
+                if reference is not None
+                else None
+            ),
+        })
+
+    fixed_results = []
+    current_libraries = [str(item) for item in libman.get_libraries(False)]
+    for resolution_value in request.get("libraries", []):
+        resolution = str(resolution_value)
+        found = librarymanager.find_library(resolution)
+        if found is None or len(found) < 1:
+            raise Exception("Installed library '%s' was not found." % resolution)
+        created = resolution not in current_libraries
+        if created:
+            libman.add_library(found[0])
+            current_libraries.append(resolution)
+        fixed_results.append({
+            "resolution": resolution,
+            "created": created,
+        })
+
+    saved = False
+    if request.get("save", True):
+        project.save()
+        saved = True
+
+    return {
+        "project_path": _project_path(project),
+        "container": _object_name(container),
+        "library_manager": _object_name(libman),
+        "placeholders": results,
+        "libraries": fixed_results,
+        "saved": saved,
+    }
+
+
+def _remove_library_references(request):
+    project = _get_primary_project(request)
+    container = _target_container(project, request)
+    libman = container.get_library_manager()
+    existing = [str(item) for item in libman.get_libraries(False)]
+    results = []
+    for name_value in request.get("libraries", []):
+        name = str(name_value)
+        removed = name in existing
+        if removed:
+            libman.remove_library(name)
+            existing.remove(name)
+        results.append({
+            "name": name,
+            "removed": removed,
+        })
+
+    saved = False
+    if request.get("save", True):
+        project.save()
+        saved = True
+    return {
+        "project_path": _project_path(project),
+        "container": _object_name(container),
+        "library_manager": _object_name(libman),
+        "libraries": results,
+        "saved": saved,
+    }
+
+
+def _configure_library_redirections(request):
+    project = _get_primary_project(request)
+    container = _target_container(project, request)
+    libman = container.get_library_manager()
+    requested = {
+        str(spec["name"]): str(spec.get("resolution", ""))
+        for spec in request.get("redirections", [])
+    }
+    found = {}
+    visited = set()
+
+    def visit(reference, depth):
+        name = str(_get_plain_attr(reference, "name") or "")
+        reference_id = str(_get_plain_attr(reference, "id") or name)
+        key = name + "|" + reference_id
+        if key in visited:
+            return
+        visited.add(key)
+
+        placeholder_name = str(_get_plain_attr(reference, "placeholder_name") or "")
+        if placeholder_name in requested and placeholder_name not in found:
+            before = _get_plain_attr(reference, "effective_resolution")
+            reference.set_redirection(requested[placeholder_name])
+            found[placeholder_name] = {
+                "name": placeholder_name,
+                "requested_resolution": requested[placeholder_name],
+                "effective_before": before,
+                "effective_after": _get_plain_attr(reference, "effective_resolution"),
+                "resolution_info": _get_plain_attr(reference, "resolution_info"),
+            }
+
+        if depth <= 0:
+            return
+        try:
+            for dependency in reference.get_dependencies():
+                visit(dependency, depth - 1)
+        except Exception:
+            pass
+
+    for reference in libman.references:
+        visit(reference, int(request.get("dependency_depth", 10)))
+
+    missing = [name for name in requested if name not in found]
+    if missing:
+        raise Exception("Library placeholder(s) not found: %s" % ", ".join(missing))
+
+    saved = False
+    if request.get("save", True):
+        project.save()
+        saved = True
+    return {
+        "project_path": _project_path(project),
+        "container": _object_name(container),
+        "redirections": [found[name] for name in requested],
+        "saved": saved,
+    }
+
+
+def _inspect_device_versions(request):
+    project = _get_primary_project(request)
+    name = request["object_name"]
+    device = _find_descendant_by_name(project, name)
+    if device is None:
+        raise Exception("Device '%s' was not found." % name)
+    current = device.get_device_identification()
+    current_record = {
+        "type": _get_plain_attr(current, "type"),
+        "id": _get_plain_attr(current, "id"),
+        "version": _get_plain_attr(current, "version"),
+    }
+
+    matches = []
+    search_name = str(request.get("search_name", name.replace("_", " ")))
+    for description in device_repository.get_all_devices(search_name, None):
+        device_id = description.device_id
+        info = description.device_info
+        matches.append({
+            "type": _get_plain_attr(device_id, "type"),
+            "id": _get_plain_attr(device_id, "id"),
+            "version": _get_plain_attr(device_id, "version"),
+            "name": _get_plain_attr(info, "name"),
+            "vendor": _get_plain_attr(info, "vendor"),
+            "description": _get_plain_attr(info, "description"),
+        })
+
+    return {
+        "project_path": _project_path(project),
+        "device_name": _object_name(device),
+        "current": current_record,
+        "matches": matches,
+    }
+
+
+def _update_device_version(request):
+    project = _get_primary_project(request)
+    name = request["object_name"]
+    device = _find_descendant_by_name(project, name)
+    if device is None:
+        raise Exception("Device '%s' was not found." % name)
+    before = device.get_device_identification()
+    before_record = {
+        "type": _get_plain_attr(before, "type"),
+        "id": _get_plain_attr(before, "id"),
+        "version": _get_plain_attr(before, "version"),
+    }
+
+    requested_type = int(request.get("type", before_record["type"]))
+    requested_id = str(request.get("id", before_record["id"]))
+    requested_version = str(request["version"])
+    requested_module = str(request.get("module", ""))
+    device.update(
+        requested_type,
+        requested_id,
+        requested_version,
+        requested_module,
+    )
+
+    after = device.get_device_identification()
+    after_record = {
+        "type": _get_plain_attr(after, "type"),
+        "id": _get_plain_attr(after, "id"),
+        "version": _get_plain_attr(after, "version"),
+    }
+    saved = False
+    if request.get("save", True):
+        project.save()
+        saved = True
+    return {
+        "project_path": _project_path(project),
+        "device_name": _object_name(device),
+        "before": before_record,
+        "after": after_record,
+        "saved": saved,
+    }
+
+
 def _upsert_function_block(request):
     project = _get_primary_project(request)
     container = _target_container(project, request)
@@ -1717,6 +2368,103 @@ def _application_command(request):
         "active_application": _object_name(app),
         "command": command,
         "messages": _collect_messages(),
+    }
+
+
+def _build_properties_target(project, request):
+    object_name = request.get("object_name")
+    if object_name:
+        target = _find_descendant_by_name(project, str(object_name))
+    else:
+        target = project.active_application
+    if target is None:
+        raise Exception("The build-properties target was not found.")
+
+    build_properties = target.build_properties
+    if build_properties is None:
+        raise Exception(
+            "Object '%s' has no editable build properties." % _object_name(target)
+        )
+    return target, build_properties
+
+
+def _inspect_build_properties(request):
+    project = _get_primary_project(request)
+    target, build_properties = _build_properties_target(project, request)
+    return {
+        "project_path": _project_path(project),
+        "object": _object_summary(target, include_text=False),
+        "compiler_defines": _plain(build_properties.compiler_defines),
+        "compiler_defines_is_valid": _plain(
+            build_properties.compiler_defines_is_valid
+        ),
+    }
+
+
+def _ensure_compiler_defines(request):
+    project = _get_primary_project(request)
+    target, build_properties = _build_properties_target(project, request)
+    if not bool(build_properties.compiler_defines_is_valid):
+        raise Exception(
+            "Compiler defines are not valid for object '%s'."
+            % _object_name(target)
+        )
+
+    before = str(build_properties.compiler_defines or "")
+    entries = [item.strip() for item in before.split(",") if item.strip()]
+    added = []
+    for requested in request.get("defines", []):
+        define = str(requested).strip()
+        if define and define not in entries:
+            entries.append(define)
+            added.append(define)
+
+    after = ", ".join(entries)
+    if after != before:
+        build_properties.compiler_defines = after
+
+    saved = False
+    if request.get("save", True):
+        project.save()
+        saved = True
+
+    return {
+        "project_path": _project_path(project),
+        "object": _object_summary(target, include_text=False),
+        "compiler_defines_before": before,
+        "compiler_defines_after": str(build_properties.compiler_defines or ""),
+        "added": added,
+        "saved": saved,
+    }
+
+
+def _project_check_all_pool_objects(request):
+    project = _get_primary_project(request)
+    if request.get("clear_messages", True):
+        _clear_active_messages()
+    project.check_all_pool_objects()
+    system.delay(int(request.get("delay_ms", 500)))
+    messages = _collect_messages()
+
+    lines = []
+    message_count = 0
+    for category in messages:
+        lines.append(u"[%s] %s" % (
+            _decode_text(category.get("category")),
+            _decode_text(category.get("description")),
+        ))
+        for message in category.get("messages", []):
+            lines.append(_decode_text(message))
+            message_count += 1
+    log_path = request.get("log_path")
+    if log_path:
+        _write_utf8(log_path, u"\n".join(lines))
+
+    return {
+        "project_path": _project_path(project),
+        "message_categories": len(messages),
+        "message_count": message_count,
+        "log_path": log_path,
     }
 
 
@@ -1910,6 +2658,18 @@ def handle_request(request):
             "action": action,
             "data": _read_object(request),
         }
+    if action == "export_object_text_files":
+        return {
+            "ok": True,
+            "action": action,
+            "data": _export_object_text_files(request),
+        }
+    if action == "update_object_text_files":
+        return {
+            "ok": True,
+            "action": action,
+            "data": _update_object_text_files(request),
+        }
     if action == "describe_object":
         return {
             "ok": True,
@@ -1994,6 +2754,48 @@ def handle_request(request):
             "action": action,
             "data": _upsert_object(request),
         }
+    if action == "upsert_visualization":
+        return {
+            "ok": True,
+            "action": action,
+            "data": _upsert_visualization(request),
+        }
+    if action == "inspect_libraries":
+        return {
+            "ok": True,
+            "action": action,
+            "data": _inspect_libraries(request),
+        }
+    if action == "ensure_library_placeholders":
+        return {
+            "ok": True,
+            "action": action,
+            "data": _ensure_library_placeholders(request),
+        }
+    if action == "remove_library_references":
+        return {
+            "ok": True,
+            "action": action,
+            "data": _remove_library_references(request),
+        }
+    if action == "configure_library_redirections":
+        return {
+            "ok": True,
+            "action": action,
+            "data": _configure_library_redirections(request),
+        }
+    if action == "inspect_device_versions":
+        return {
+            "ok": True,
+            "action": action,
+            "data": _inspect_device_versions(request),
+        }
+    if action == "update_device_version":
+        return {
+            "ok": True,
+            "action": action,
+            "data": _update_device_version(request),
+        }
     if action == "upsert_function_block":
         return {
             "ok": True,
@@ -2023,6 +2825,24 @@ def handle_request(request):
             "ok": True,
             "action": action,
             "data": _application_command(request),
+        }
+    if action == "inspect_build_properties":
+        return {
+            "ok": True,
+            "action": action,
+            "data": _inspect_build_properties(request),
+        }
+    if action == "ensure_compiler_defines":
+        return {
+            "ok": True,
+            "action": action,
+            "data": _ensure_compiler_defines(request),
+        }
+    if action == "project_check_all_pool_objects":
+        return {
+            "ok": True,
+            "action": action,
+            "data": _project_check_all_pool_objects(request),
         }
     if action == "online_status":
         return {

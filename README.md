@@ -117,6 +117,102 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\launcher\Send-CodesysReque
 
 The first edit action is idempotent: it creates `GVL` under the active application if needed, ensures `xTest : BOOL;` exists in its declaration, and saves the project unless `-NoSave` is passed.
 
+## Connect GitHub Copilot in VS Code from another computer
+
+Use this layout when CODESYS runs on computer A and VS Code with GitHub Copilot
+runs on computer B:
+
+```text
+Computer B                                  Computer A
+-----------------------------------         ---------------------------------
+VS Code + GitHub Copilot Agent  --MCP-->    HTTP MCP bridge :8765
+shared project folder                       CODESYS + in-IDE IronPython agent
+```
+
+The network share gives Copilot access to the repository files. MCP is the
+separate control connection that lets Copilot inspect and operate the open
+CODESYS project.
+
+On computer A, start the in-IDE agent and verify it from the repository root:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File .\launcher\Send-CodesysRequest.ps1 `
+  inspect `
+  -NoProjectPathMatch
+```
+
+Then start the bridge on computer A. `CODESYS_MCP_ALLOW_WRITE` and
+`CODESYS_MCP_ALLOW_BUILD` retain the convenient named tools; the authenticated
+`execute_codesys_action` passthrough is always available and is not limited by
+those two flags.
+
+```powershell
+Set-Location .\mcp-server
+$env:CODESYS_MCP_API_KEY = "<AT_LEAST_32_RANDOM_CHARACTERS>"
+$env:CODESYS_MCP_ALLOWED_HOSTS = "<COMPUTER_A_IP_ADDRESS>,<COMPUTER_A_HOSTNAME>"
+$env:CODESYS_MCP_ALLOW_WRITE = "true"
+$env:CODESYS_MCP_ALLOW_BUILD = "true"
+
+.\Start-CodesysMcpBridge.ps1 `
+  -ListenAddress 0.0.0.0 `
+  -Port 8765
+```
+
+Computer A must accept inbound TCP traffic on port `8765`. Computer B initiates
+the connection and normally needs neither an inbound firewall rule nor
+administrator rights.
+
+On computer B, create `.vscode/mcp.json` in the shared workspace or run
+**MCP: Open User Configuration** in VS Code and use:
+
+```json
+{
+  "inputs": [
+    {
+      "type": "promptString",
+      "id": "codesys-api-key",
+      "description": "CODESYS MCP API key",
+      "password": true
+    }
+  ],
+  "servers": {
+    "codesys": {
+      "type": "http",
+      "url": "http://<COMPUTER_A_IP_ADDRESS>:8765/mcp",
+      "headers": {
+        "X-API-Key": "${input:codesys-api-key}"
+      }
+    }
+  }
+}
+```
+
+Run **MCP: List Servers**, start or restart `codesys`, and enable its tools in
+Copilot Agent mode. After updating this repository's MCP tool definitions, run
+**MCP: Reset Cached Tools** or restart the server so Copilot discovers the new
+tool list.
+
+The `execute_codesys_action` tool takes the exact action name and a raw object
+containing the remaining request fields. For example, its MCP arguments for a
+clean are:
+
+```json
+{
+  "action": "application_command",
+  "parameters": {
+    "command": "clean"
+  }
+}
+```
+
+It exposes every action implemented by `ide_scripts/codesys_agent.py`, including
+clean/generate code, device and library configuration, XML/text import and
+export, visualizations, compiler defines, deletion, and online login/control/
+read/write. For import/export actions, every path is interpreted on computer A.
+Use a path that computer A can access; a drive letter mapped only on computer B
+will not work.
+
 ## Connect a local AnythingLLM installation through MCP
 
 This section starts with two clean computers and builds the following setup:
@@ -337,7 +433,7 @@ Expected output:
 
 ```text
 CODESYS MCP bridge listening at http://0.0.0.0:8765/mcp (SSE fallback: /sse)
-Tools: read-only enabled; write=true; build=true; agent=default
+Tools: raw action enabled; named read-only enabled; write=true; build=true; agent=default
 ```
 
 The recommended startup profile always enables both write and build tools.
@@ -664,17 +760,19 @@ The startup commands in this README always set both permission variables to
 `"true"`. Confirm this line whenever the bridge starts:
 
 ```text
-Tools: read-only enabled; write=true; build=true; agent=default
+Tools: raw action enabled; named read-only enabled; write=true; build=true; agent=default
 ```
 
 No additional approval credential is needed. Possession of the API key grants
-access to every tool enabled by these startup flags.
+access to the raw action tool and every named tool enabled by these startup
+flags.
 
 The complete enabled tool set is:
 
 - `inspect_project`
 - `inspect_tree`
 - `read_object`
+- `execute_codesys_action`
 - `upsert_function_block`
 - `upsert_program`
 - `upsert_function`
@@ -688,8 +786,11 @@ Structured Text implementation, save successful writes by default, and verify
 the implementation returned by CODESYS. They do not accept a `container`
 argument and target the active Application.
 
-No login, download, PLC start/stop, online write, force, arbitrary PowerShell,
-or arbitrary JSON tool is exposed.
+`execute_codesys_action` passes its `action` and `parameters` directly to the
+in-IDE agent. It is available whenever the authenticated MCP bridge is running,
+independent of the named write/build flags. It does not execute arbitrary
+PowerShell, but it exposes all actions implemented by `codesys_agent.py`,
+including online login/control/read/write and file-based import/export.
 
 ### 12. Recommended AnythingLLM workspace instruction
 
@@ -702,7 +803,9 @@ function block, or function, use its dedicated upsert tool and send the full
 declaration and executable implementation together in one call. Read the
 object again after writing it. Build the project, report every compiler error,
 correct the code, and rebuild. Never report success based only on the tool-call
-transport message; verify that the returned CODESYS JSON contains ok=true.
+transport message; verify that the returned CODESYS JSON contains ok=true. For
+an operation without a dedicated named tool, call execute_codesys_action with
+the exact action and raw parameters used by ide_scripts/codesys_agent.py.
 ```
 
 ### 13. Daily startup after the initial setup
@@ -876,6 +979,7 @@ table, transport details, safety model, and bridge-specific tests.
 
 Official upstream references:
 
+- [VS Code MCP server configuration](https://code.visualstudio.com/docs/agent-customization/mcp-servers)
 - [AnythingLLM Docker guide](https://github.com/Mintplex-Labs/anything-llm/blob/master/docker/HOW_TO_USE_DOCKER.md)
 - [Docker Engine on Ubuntu](https://docs.docker.com/engine/install/ubuntu/)
 - [Ollama on Linux](https://docs.ollama.com/linux)

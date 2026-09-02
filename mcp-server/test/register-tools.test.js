@@ -15,13 +15,14 @@ function collectTools(config, bridge = {}) {
   return tools;
 }
 
-test("read-only mode exposes only inspection tools", () => {
+test("minimal mode exposes inspection tools and the raw action passthrough", () => {
   const tools = collectTools({ allowWrite: false, allowBuild: false });
 
   assert.deepEqual([...tools.keys()], [
     "inspect_project",
     "inspect_tree",
     "read_object",
+    "execute_codesys_action",
   ]);
 });
 
@@ -32,6 +33,7 @@ test("enabled mutation tools do not request a second approval credential", () =>
     "inspect_project",
     "inspect_tree",
     "read_object",
+    "execute_codesys_action",
     "upsert_function_block",
     "upsert_program",
     "upsert_function",
@@ -79,6 +81,28 @@ test("enabled mutation tools do not request a second approval credential", () =>
   assert.equal(tools.get("upsert_object").options.inputSchema.save.parse(undefined), true);
   assert.equal(tools.get("add_gvl_variable").options.inputSchema.save.parse(undefined), true);
   assert.equal(tools.get("rename_object").options.inputSchema.save.parse(undefined), true);
+});
+
+test("raw action tool forwards every parameter without permission gating", async () => {
+  let received;
+  const bridge = {
+    async executeAgentAction(argumentsObject) {
+      received = argumentsObject;
+      return { ok: true, action: argumentsObject.action, data: {} };
+    },
+  };
+  const tools = collectTools({ allowWrite: false, allowBuild: false }, bridge);
+
+  const result = await tools.get("execute_codesys_action").handler({
+    action: "application_command",
+    parameters: { command: "clean", clear_messages: false },
+  });
+
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(received, {
+    action: "application_command",
+    parameters: { command: "clean", clear_messages: false },
+  });
 });
 
 test("upsert rejects empty executable objects before calling CODESYS", async () => {

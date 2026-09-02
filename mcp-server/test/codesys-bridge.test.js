@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -54,4 +55,33 @@ test("readObject inspects first and pins the operation to the returned project",
   assert.ok(calls[0].includes("-NoProjectPathMatch"));
   assert.ok(calls[1].includes("C:\\Projects\\Active.project"));
   assert.ok(calls[1].includes("POU"));
+});
+
+test("executeAgentAction serializes and sends the complete raw request", async () => {
+  let request;
+  const runner = async (_executable, argumentsList) => {
+    const requestPathIndex = argumentsList.indexOf("-RequestJson");
+    assert.notEqual(requestPathIndex, -1);
+    request = JSON.parse(await readFile(argumentsList[requestPathIndex + 1], "utf8"));
+    return {
+      stdout: JSON.stringify({ ok: true, action: request.action, data: request }),
+    };
+  };
+
+  const bridge = new CodesysBridge(config(), runner);
+  const result = await bridge.executeAgentAction({
+    action: "application_command",
+    parameters: {
+      action: "ignored_value",
+      command: "clean",
+      clear_messages: false,
+    },
+  });
+
+  assert.deepEqual(request, {
+    action: "application_command",
+    command: "clean",
+    clear_messages: false,
+  });
+  assert.equal(result.action, "application_command");
 });

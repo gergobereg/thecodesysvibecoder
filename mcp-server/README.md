@@ -1,17 +1,20 @@
 # thecodesysvibecoder MCP bridge
 
 This service runs on the Windows computer that already runs CODESYS. It exposes
-only named MCP tools and translates them into calls to
-`launcher/Send-CodesysRequest.ps1`. It never exposes a generic shell command.
+named convenience tools plus one raw CODESYS-agent passthrough and translates
+them into calls to `launcher/Send-CodesysRequest.ps1`. It never exposes a
+generic shell command.
 
 ## Safety model
 
 - `CODESYS_MCP_API_KEY` is mandatory and must contain at least 32 characters.
+- Every authenticated client can use `execute_codesys_action` to call any
+  action implemented by `ide_scripts/codesys_agent.py` with raw parameters.
 - The recommended startup profile in this README enables write and build tools.
-  If the permission variables are omitted, only `inspect_project`,
-  `inspect_tree`, and `read_object` are exposed.
-- Write tools appear only when `CODESYS_MCP_ALLOW_WRITE=true`.
-- The build tool appears only when `CODESYS_MCP_ALLOW_BUILD=true`.
+  If the permission variables are omitted, the three named inspection tools and
+  `execute_codesys_action` are exposed.
+- Named write tools appear only when `CODESYS_MCP_ALLOW_WRITE=true`.
+- The named build tool appears only when `CODESYS_MCP_ALLOW_BUILD=true`.
 - The authenticated MCP connection is the authorization boundary. Enabled
   write/build tools do not require a second per-call approval credential.
 - Write tools save successful changes by default. Callers may explicitly pass
@@ -23,18 +26,24 @@ only named MCP tools and translates them into calls to
 - Dedicated `upsert_function_block`, `upsert_program`, and `upsert_function`
   tools make both code fields mandatory and target the active Application, so
   a smaller model cannot accidentally use the POU itself as its parent.
-- The bridge re-inspects the IDE immediately before every operation and pins the
-  following request to the returned active project path.
+- The named tools re-inspect the IDE before project-specific operations and pin
+  the following request to the returned active project path. The raw tool sends
+  exactly the supplied parameters.
 - Requests are serialized so parallel LLM tool calls cannot race through the
   mailbox.
-- No login, download, PLC start/stop, online write, force, raw JSON, or generic
-  PowerShell tool is exposed.
+- The raw action tool includes online login/control/read/write, deletion,
+  import/export, device configuration, library management, and every other
+  action implemented by the in-IDE agent. File paths are resolved on the
+  Windows computer running CODESYS.
+- Arbitrary PowerShell is not exposed.
 
 ## Install on Windows
 
 For a complete two-computer procedure starting with a clean Windows CODESYS
 computer and a local Ollama/AnythingLLM Ubuntu computer, see
 [`Connect a local AnythingLLM installation through MCP`](../README.md#connect-a-local-anythingllm-installation-through-mcp).
+For GitHub Copilot on a separate VS Code computer, see
+[`Connect GitHub Copilot in VS Code from another computer`](../README.md#connect-github-copilot-in-vs-code-from-another-computer).
 For routine startup after the one-time setup, see
 [`Daily startup after the initial setup`](../README.md#13-daily-startup-after-the-initial-setup).
 
@@ -211,8 +220,9 @@ $env:CODESYS_MCP_ALLOW_BUILD = "true"
 ```
 
 The bridge registers its tool list at startup, so restart it whenever
-permissions change. A recommended prompt policy for the AnythingLLM workspace
-is:
+permissions change. The permission flags affect only the named convenience
+tools; `execute_codesys_action` is always present for an authenticated client.
+A recommended prompt policy for the AnythingLLM or Copilot workspace is:
 
 ```text
 Always inspect the active project first. Read every affected object before
@@ -249,7 +259,7 @@ npm.cmd test
 ```
 
 With CODESYS and the in-IDE agent running, exercise both network transports and
-the real read-only `inspect_project` tool:
+the real `inspect_project` and raw `execute_codesys_action` tools:
 
 ```powershell
 npm.cmd run smoke
