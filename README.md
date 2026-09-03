@@ -128,54 +128,275 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\launcher\Send-CodesysReque
 
 The first edit action is idempotent: it creates `GVL` under the active application if needed, ensures `xTest : BOOL;` exists in its declaration, and saves the project unless `-NoSave` is passed.
 
-## Connect GitHub Copilot in VS Code from another computer
+## Connect two Windows PCs: CODESYS on one, VS Code Copilot on the other
 
-Use this layout when CODESYS runs on computer A and VS Code with GitHub Copilot
-runs on computer B:
+This procedure uses the following names:
+
+| Name | Role |
+| --- | --- |
+| Computer A | Windows PC running CODESYS, this repository, the in-IDE agent, and the MCP bridge |
+| Computer B | Windows PC running VS Code and GitHub Copilot |
+| `<COMPUTER_A_IP_ADDRESS>` | LAN IPv4 address of computer A, for example `192.168.1.20` |
+| `<COMPUTER_B_IP_ADDRESS>` | LAN IPv4 address of computer B, for example `192.168.1.30` |
+| `<COMPUTER_A_HOSTNAME>` | Windows computer name of computer A |
+| `<REPOSITORY_ROOT>` | Local path to this repository on computer A |
+
+The two connections serve different purposes:
 
 ```text
-Computer B                                  Computer A
------------------------------------         ---------------------------------
-VS Code + GitHub Copilot Agent  --MCP-->    HTTP MCP bridge :8765
-shared project folder                       CODESYS + in-IDE IronPython agent
+Computer B                                      Computer A
+------------------------------------            ---------------------------------
+VS Code workspace  --optional SMB share------> repository/project files
+GitHub Copilot     --HTTP MCP, TCP 8765------> MCP bridge
+                                                      |
+                                                      v
+                                               PowerShell mailbox launcher
+                                                      |
+                                                      v
+                                               in-IDE agent -> active CODESYS project
 ```
 
-The network share gives Copilot access to the repository files. MCP is the
-separate control connection that lets Copilot inspect and operate the open
-CODESYS project.
+The network share lets Copilot read normal workspace files and repository
+instructions. MCP is the control connection that lets Copilot inspect and
+change the project currently open in CODESYS. MCP does not require the CODESYS
+project file itself to be shared, and sharing a folder does not replace MCP.
 
-On computer A, start the in-IDE agent and verify it from the repository root:
+Both computers should be on the same trusted private LAN, or connected through
+an organization-approved VPN. Do not forward port `8765` through an Internet
+router.
+
+### 1. Prepare computer A
+
+Computer A needs:
+
+- Windows 10 or Windows 11.
+- CODESYS V3.5 SP22 Patch 1 with scripting support.
+- This complete repository; do not copy only `mcp-server`.
+- Node.js 20 or newer.
+
+From a normal PowerShell window on computer A, install and test the bridge:
 
 ```powershell
+Set-Location "<REPOSITORY_ROOT>\mcp-server"
+node --version
+npm.cmd ci
+npm.cmd test
+```
+
+Find the active IPv4 address and computer name:
+
+```powershell
+ipconfig
+$env:COMPUTERNAME
+```
+
+Use the IPv4 address of the Ethernet or Wi-Fi adapter connected to computer B.
+Avoid a VPN, virtual-machine, Bluetooth, or disconnected adapter address unless
+that adapter is intentionally carrying the connection.
+
+### 2. Generate the API key on computer A
+
+Generate one random key. Do not put its value in this repository or in the VS
+Code MCP configuration file:
+
+```powershell
+$McpRandom = [Security.Cryptography.RandomNumberGenerator]::Create()
+$McpBytes = New-Object byte[] 32
+$McpRandom.GetBytes($McpBytes)
+$McpRandom.Dispose()
+$McpApiKey = ([BitConverter]::ToString($McpBytes)).Replace("-", "")
+$env:CODESYS_MCP_API_KEY = $McpApiKey
+$McpApiKey.Length
+```
+
+The final command must print `64`. On a trusted, single-user account, save the
+key as a user environment variable so it survives a reboot:
+
+```powershell
+[Environment]::SetEnvironmentVariable(
+  "CODESYS_MCP_API_KEY",
+  $McpApiKey,
+  "User"
+)
+```
+
+Transfer the key once to computer B through a trusted password manager or
+another encrypted channel. VS Code will request it through a password input;
+it does not need to appear in `mcp.json`.
+
+### 3. Allow computer B through the firewall on computer A
+
+Run `ipconfig` on computer B and note its LAN IPv4 address. Then open
+**PowerShell as Administrator on computer A** and create an inbound rule that
+accepts only computer B:
+
+```powershell
+Get-NetConnectionProfile
+
+$CopilotPcIp = "<COMPUTER_B_IP_ADDRESS>"
+
+New-NetFirewallRule `
+  -DisplayName "thecodesysvibecoder MCP from Copilot PC" `
+  -Direction Inbound `
+  -Action Allow `
+  -Protocol TCP `
+  -LocalPort 8765 `
+  -RemoteAddress $CopilotPcIp `
+  -Profile Private,Domain
+```
+
+The active connection shown by `Get-NetConnectionProfile` should be `Private`
+or `DomainAuthenticated`. Do not enable this rule for a `Public` network.
+
+Verify both the port and permitted remote address:
+
+```powershell
+Get-NetFirewallRule `
+  -DisplayName "thecodesysvibecoder MCP from Copilot PC" |
+  Get-NetFirewallPortFilter
+
+Get-NetFirewallRule `
+  -DisplayName "thecodesysvibecoder MCP from Copilot PC" |
+  Get-NetFirewallAddressFilter
+```
+
+Computer B initiates the connection, so it normally needs no inbound firewall
+rule and no administrator rights. Administrator access is required only on
+computer A to create the inbound rule. If company policy blocks outbound port
+`8765` on computer B or prevents an inbound rule on computer A, an administrator
+must approve the connection or provide an approved VPN/tunnel.
+
+### 4. Start CODESYS and the in-IDE agent on computer A
+
+1. Start CODESYS normally on computer A.
+2. Open the project Copilot should control and make it the active project.
+3. Select **Tools > Scripting > Execute Script File** in CODESYS.
+4. Select `<REPOSITORY_ROOT>\ide_scripts\run_in_ide_agent.py`.
+5. Wait for the script command to return. The registered agent remains active.
+
+Do not execute `run_in_ide_agent.py` from PowerShell and do not start another
+CODESYS instance as a workaround.
+
+From the repository root on computer A, verify the real active project:
+
+```powershell
+Set-Location "<REPOSITORY_ROOT>"
+
 powershell -NoProfile -ExecutionPolicy Bypass `
   -File .\launcher\Send-CodesysRequest.ps1 `
   inspect `
   -NoProjectPathMatch
 ```
 
-Then start the bridge on computer A. `CODESYS_MCP_ALLOW_WRITE` and
-`CODESYS_MCP_ALLOW_BUILD` retain the convenient named tools; the authenticated
-`execute_codesys_action` passthrough is always available and is not limited by
-those two flags.
+Continue only when the JSON contains `"ok": true` and identifies the expected
+project and active application.
+
+### 5. Start the MCP bridge on computer A
+
+Use a normal, non-administrator PowerShell window. Load the saved API key,
+allow the IP address and hostname that computer B will use in its URL, enable
+the named write/build tools, and start the bridge on all LAN interfaces:
 
 ```powershell
-Set-Location .\mcp-server
-$env:CODESYS_MCP_API_KEY = "<AT_LEAST_32_RANDOM_CHARACTERS>"
-$env:CODESYS_MCP_ALLOWED_HOSTS = "<COMPUTER_A_IP_ADDRESS>,<COMPUTER_A_HOSTNAME>"
+Set-Location "<REPOSITORY_ROOT>\mcp-server"
+
+$env:CODESYS_MCP_API_KEY = [Environment]::GetEnvironmentVariable(
+  "CODESYS_MCP_API_KEY",
+  "User"
+)
+
+if ([string]::IsNullOrWhiteSpace($env:CODESYS_MCP_API_KEY) -or
+    $env:CODESYS_MCP_API_KEY.Length -lt 32) {
+  throw "A valid CODESYS_MCP_API_KEY was not found."
+}
+
+$env:CODESYS_MCP_ALLOWED_HOSTS = `
+  "<COMPUTER_A_IP_ADDRESS>,<COMPUTER_A_HOSTNAME>"
 $env:CODESYS_MCP_ALLOW_WRITE = "true"
 $env:CODESYS_MCP_ALLOW_BUILD = "true"
 
-.\Start-CodesysMcpBridge.ps1 `
+Remove-Item Env:CODESYS_MCP_ALLOWED_IPS -ErrorAction SilentlyContinue
+
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File .\Start-CodesysMcpBridge.ps1 `
   -ListenAddress 0.0.0.0 `
   -Port 8765
 ```
 
-Computer A must accept inbound TCP traffic on port `8765`. Computer B initiates
-the connection and normally needs neither an inbound firewall rule nor
-administrator rights.
+Keep this PowerShell window open. Expected startup output includes:
 
-On computer B, create `.vscode/mcp.json` in the shared workspace or run
-**MCP: Open User Configuration** in VS Code and use:
+```text
+CODESYS MCP bridge listening at http://0.0.0.0:8765/mcp (SSE fallback: /sse)
+Tools: raw action enabled; named read-only enabled; write=true; build=true; agent=default
+```
+
+In another PowerShell window on computer A, confirm that the listener exists:
+
+```powershell
+Get-NetTCPConnection -LocalPort 8765 -State Listen
+```
+
+### 6. Test the network from computer B
+
+Run these commands in PowerShell on computer B:
+
+```powershell
+Test-NetConnection <COMPUTER_A_IP_ADDRESS> -Port 8765
+Invoke-RestMethod http://<COMPUTER_A_IP_ADDRESS>:8765/health
+```
+
+`TcpTestSucceeded` must be `True`, and the health request should return a result
+equivalent to:
+
+```json
+{"status":"ok","service":"codesys-mcp-bridge"}
+```
+
+The health endpoint checks only the HTTP bridge. It does not require the API
+key and does not prove that the in-IDE agent is running; step 4 verifies that
+separate connection.
+
+### 7. Optionally open computer A's folder in VS Code on computer B
+
+If Copilot should also read repository files and `AGENTS.md`, share the desired
+folder on computer A using Windows file sharing:
+
+1. In File Explorer on computer A, right-click the repository folder and select
+   **Properties > Sharing > Advanced Sharing**.
+2. Select **Share this folder**, choose a share name, and open **Permissions**.
+3. Grant the Windows account used from computer B **Read** permission. Grant
+   **Change** only if that account should intentionally edit repository files.
+4. Check the folder's **Security** tab as well; both the share permissions and
+   NTFS permissions must allow the intended access.
+5. Apply the changes. Creating the share may require administrator approval on
+   computer A.
+
+Then, on computer B, select **File > Open Folder** in VS Code and enter a UNC
+path such as:
+
+```text
+\\<COMPUTER_A_HOSTNAME>\<SHARE_NAME>
+```
+
+Read permission is sufficient when all CODESYS changes go through MCP. Grant
+Change permission only if Copilot should intentionally edit the repository
+files from computer B. Only computer A should open the CODESYS project in the
+CODESYS IDE.
+
+The shared folder and MCP endpoint are independent. If the folder is not
+shared, Copilot can still operate the active CODESYS project through MCP, but
+it will not automatically see the repository instructions or normal files.
+
+### 8. Configure MCP in VS Code on computer B
+
+Use VS Code user configuration so the LAN address stays out of the public
+repository:
+
+1. Install VS Code and the GitHub Copilot Chat extension, then sign in.
+2. Press `Ctrl+Shift+P` to open the Command Palette.
+3. Run **MCP: Open User Configuration**.
+4. Merge the following `codesys` server into the opened `mcp.json`, replacing
+   `<COMPUTER_A_IP_ADDRESS>` with computer A's real LAN address.
 
 ```json
 {
@@ -199,14 +420,47 @@ On computer B, create `.vscode/mcp.json` in the shared workspace or run
 }
 ```
 
-Run **MCP: List Servers**, start or restart `codesys`, and enable its tools in
-Copilot Agent mode. After updating this repository's MCP tool definitions, run
-**MCP: Reset Cached Tools** or restart the server so Copilot discovers the new
-tool list.
+If the file already contains other inputs or servers, preserve them and add
+only the new entries. Save the file, then:
 
-The `execute_codesys_action` tool takes the exact action name and a raw object
-containing the remaining request fields. For example, its MCP arguments for a
-clean are:
+1. Press `Ctrl+Shift+P` and run **MCP: List Servers**.
+2. Select `codesys`, then select **Start Server** or **Restart Server**.
+3. Paste the API key when VS Code displays the password prompt.
+4. Review and accept the MCP trust prompt if VS Code shows it.
+5. Use **Show Output** for `codesys` and confirm the server is running and its
+   tools were discovered.
+6. Open Copilot Chat in **Agent** mode, open the tools picker, and enable the
+   `codesys` tools.
+
+The normal configuration currently exposes 11 tools. The exact count can
+change when named tools are added; successful discovery and the presence of
+`inspect_project` and `execute_codesys_action` are more important than the
+number alone.
+
+### 9. Perform the first Copilot test
+
+Start with a read-only request in Copilot Agent mode:
+
+```text
+Use the CODESYS MCP tools. Inspect the active project, report its project path
+and active application, then inspect the project tree to depth 3. Do not modify
+anything.
+```
+
+Compare the returned project with the project visible on computer A. After it
+matches, test a build:
+
+```text
+Build the active CODESYS application through MCP and report all compiler errors
+and warnings. Do not change the project.
+```
+
+For actual changes, instruct Copilot to inspect affected objects first, make
+the smallest change, read the result back, and build. A successful MCP transport
+call is not enough; the returned CODESYS JSON must contain `"ok": true`.
+
+The `execute_codesys_action` tool accepts the exact action name and a raw
+`parameters` object. For example, its arguments for a clean are:
 
 ```json
 {
@@ -220,9 +474,52 @@ clean are:
 It exposes every action implemented by `ide_scripts/codesys_agent.py`, including
 clean/generate code, device and library configuration, XML/text import and
 export, visualizations, compiler defines, deletion, and online login/control/
-read/write. For import/export actions, every path is interpreted on computer A.
-Use a path that computer A can access; a drive letter mapped only on computer B
-will not work.
+read/write. For import/export actions, paths are interpreted on computer A. A
+drive letter mapped only on computer B will not work; use a computer-A-local
+path or a UNC path that computer A can access.
+
+### 10. Daily startup after the one-time setup
+
+On computer A:
+
+1. Start CODESYS and open the intended project.
+2. Run `ide_scripts\run_in_ide_agent.py` inside CODESYS.
+3. Run the `inspect -NoProjectPathMatch` command from step 4.
+4. Run the bridge startup block from step 5 and leave that PowerShell window
+   open.
+
+On computer B:
+
+1. Open the workspace in VS Code.
+2. Run **MCP: List Servers** and confirm `codesys` is running.
+3. Start a new Copilot Agent chat and verify the active project before editing.
+
+### 11. Restart after bridge or tool changes
+
+When this repository's MCP code or tool descriptions change:
+
+1. Press `Ctrl+C` in the bridge PowerShell window on computer A.
+2. Run the bridge startup command from step 5 again.
+3. On computer B, run **MCP: List Servers**, select `codesys`, and choose
+   **Restart Server**.
+4. Run **MCP: Reset Cached Tools** from the Command Palette.
+5. Start a new Copilot Agent chat if an existing chat still uses the old tool
+   schema.
+
+Restarting the MCP bridge does not restart CODESYS or the in-IDE agent.
+
+### 12. Two-Windows-PC troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| `TcpTestSucceeded` is `False` | Confirm the bridge is running with `-ListenAddress 0.0.0.0`, computer A's IP has not changed, both PCs are on the intended network, and the firewall rule on computer A permits computer B's current IP. |
+| `/health` works but VS Code reports HTTP `401` | The API key pasted into VS Code does not match `CODESYS_MCP_API_KEY` used when the bridge started. Restart the VS Code server to prompt for it again. |
+| VS Code reports HTTP `421` | Add the exact IP address or hostname used in the MCP URL to `CODESYS_MCP_ALLOWED_HOSTS`, then restart the bridge. |
+| MCP connects but CODESYS requests time out | Run the inspection command locally on computer A. Re-run `run_in_ide_agent.py` inside the correct CODESYS instance if needed. |
+| Copilot sees old tools | Restart the bridge on computer A, restart `codesys` in **MCP: List Servers**, run **MCP: Reset Cached Tools**, and start a new Agent chat. |
+| The shared folder cannot be opened | Diagnose Windows file sharing and credentials separately. MCP can still work when SMB sharing does not, and SMB can work while MCP port `8765` is blocked. |
+| Computer B has no administrator rights | This is normally fine. The required inbound firewall rule is created on computer A. Corporate outbound restrictions on computer B still require an administrator. |
+| Port `8765` cannot be opened on computer A | Direct LAN MCP cannot work until an administrator permits it. Use an organization-approved VPN or authenticated tunnel rather than exposing the port publicly. |
 
 ## Connect a local AnythingLLM installation through MCP
 
@@ -991,6 +1288,7 @@ table, transport details, safety model, and bridge-specific tests.
 Official upstream references:
 
 - [VS Code MCP server configuration](https://code.visualstudio.com/docs/agent-customization/mcp-servers)
+- [Windows Defender Firewall `New-NetFirewallRule`](https://learn.microsoft.com/powershell/module/netsecurity/new-netfirewallrule)
 - [AnythingLLM Docker guide](https://github.com/Mintplex-Labs/anything-llm/blob/master/docker/HOW_TO_USE_DOCKER.md)
 - [Docker Engine on Ubuntu](https://docs.docker.com/engine/install/ubuntu/)
 - [Ollama on Linux](https://docs.ollama.com/linux)

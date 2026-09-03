@@ -42,8 +42,8 @@ generic shell command.
 For a complete two-computer procedure starting with a clean Windows CODESYS
 computer and a local Ollama/AnythingLLM Ubuntu computer, see
 [`Connect a local AnythingLLM installation through MCP`](../README.md#connect-a-local-anythingllm-installation-through-mcp).
-For GitHub Copilot on a separate VS Code computer, see
-[`Connect GitHub Copilot in VS Code from another computer`](../README.md#connect-github-copilot-in-vs-code-from-another-computer).
+For GitHub Copilot on a separate Windows computer, see
+[`Connect two Windows PCs: CODESYS on one, VS Code Copilot on the other`](../README.md#connect-two-windows-pcs-codesys-on-one-vs-code-copilot-on-the-other).
 For routine startup after the one-time setup, see
 [`Daily startup after the initial setup`](../README.md#13-daily-startup-after-the-initial-setup).
 
